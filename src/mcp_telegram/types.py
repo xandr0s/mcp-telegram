@@ -9,6 +9,8 @@ from pydantic import BaseModel
 from telethon import hints, types, utils  # type: ignore
 from telethon.tl import custom, patched  # type: ignore
 
+from .utils import render_rich_message
+
 
 class DialogType(Enum):
     """The type of a dialog."""
@@ -152,6 +154,10 @@ class Message(BaseModel):
     """The media associated with the message."""
     reply_to: int | None = None
     """The message ID that this message is replying to."""
+    rich: bool = False
+    """Whether the text was recovered from a rich message (new post format)."""
+    rich_photo_count: int | None = None
+    """Number of photos embedded in the rich message, if any."""
 
     @staticmethod
     def from_message(message: patched.Message) -> "Message":
@@ -171,6 +177,20 @@ class Message(BaseModel):
         message_text: str | None = (
             message.text if isinstance(message.text, str) else None  # type: ignore
         )
+
+        # Rich messages (Telegram's new post format, TL layer 227+) keep their
+        # content in `Message.rich_message` and leave `Message.message` empty.
+        # Without this the whole post reads as an empty message downstream.
+        rich = False
+        rich_photo_count: int | None = None
+        rich_message = getattr(message, "rich_message", None)
+        if rich_message is not None:
+            rich_text, photo_count = render_rich_message(rich_message)
+            rich_photo_count = photo_count or None
+            if rich_text and not (message_text or "").strip():
+                message_text = rich_text
+                rich = True
+
         reply_to: int | None = None
         if message.reply_to and isinstance(message.reply_to, types.MessageReplyHeader):
             try:
@@ -190,6 +210,8 @@ class Message(BaseModel):
             date=message.date,
             media=media,
             reply_to=reply_to,
+            rich=rich,
+            rich_photo_count=rich_photo_count,
         )
 
 
