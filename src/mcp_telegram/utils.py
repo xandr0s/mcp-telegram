@@ -1,6 +1,7 @@
 """Utility functions for the MCP Telegram module."""
 
 import re
+import typing
 import uuid
 
 from pathlib import Path
@@ -60,6 +61,80 @@ def get_unique_filename(message: patched.Message) -> str:
             filename = fallback_name
 
     return filename
+
+
+def render_rich_text(node: typing.Any) -> str:
+    """Flatten a Telethon ``RichText`` tree into a Markdown-ish string.
+
+    Rich messages (Telegram's new post format, TL layer 227+) carry their text
+    as a nested ``RichText`` tree instead of ``Message.message``. Unknown node
+    types fall through to their children so new formatting never silently drops
+    the text.
+    """
+    if node is None:
+        return ""
+    name = type(node).__name__
+    if name == "TextEmpty":
+        return ""
+    if name == "TextPlain":
+        return str(getattr(node, "text", "") or "")
+    if name == "TextConcat":
+        return "".join(render_rich_text(child) for child in (node.texts or []))
+
+    inner = render_rich_text(getattr(node, "text", None))
+    if not inner.strip():
+        return inner
+    if name == "TextBold":
+        return f"**{inner}**"
+    if name in ("TextItalic", "TextMarked"):
+        return f"*{inner}*"
+    if name == "TextStrike":
+        return f"~~{inner}~~"
+    if name == "TextFixed":
+        return f"`{inner}`"
+    if name in ("TextUrl", "TextAutoUrl"):
+        url = getattr(node, "url", None)
+        return f"[{inner}]({url})" if url else inner
+    if name == "TextEmail":
+        return f"[{inner}](mailto:{getattr(node, 'email', '')})"
+    return inner
+
+
+def render_rich_message(rich: typing.Any) -> tuple[str, int]:
+    """Flatten a ``RichMessage`` into (text, photo_count).
+
+    Blocks are Instant-View style ``PageBlock*`` objects: paragraphs carry
+    ``text``, collages and slideshows carry ``items`` plus an optional
+    ``caption``. Anything unrecognised is still walked for nested text.
+    """
+    if rich is None:
+        return "", 0
+
+    parts: list[str] = []
+    photos = 0
+
+    def walk(block: typing.Any) -> None:
+        nonlocal photos
+        name = type(block).__name__
+        if name == "PageBlockPhoto":
+            photos += 1
+        for item in getattr(block, "items", None) or []:
+            walk(item)
+        text = render_rich_text(getattr(block, "text", None)).strip()
+        if text:
+            parts.append(text)
+        caption = getattr(block, "caption", None)
+        if caption is not None:
+            for attr in ("text", "credit"):
+                rendered = render_rich_text(getattr(caption, attr, None)).strip()
+                if rendered:
+                    parts.append(rendered)
+
+    for block in getattr(rich, "blocks", None) or []:
+        walk(block)
+
+    photos = max(photos, len(getattr(rich, "photos", None) or []))
+    return "\n\n".join(parts), photos
 
 
 def parse_telegram_url(url: str) -> tuple[str | int, int] | None:
