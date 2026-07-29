@@ -118,8 +118,11 @@ def render_rich_message(rich: typing.Any) -> tuple[str, int]:
         name = type(block).__name__
         if name == "PageBlockPhoto":
             photos += 1
-        for item in getattr(block, "items", None) or []:
-            walk(item)
+        # Collages and slideshows nest under `items`; details, blockquotes and
+        # covers nest under `blocks`. Walk both so nested text is never lost.
+        for attr in ("items", "blocks"):
+            for child in getattr(block, attr, None) or []:
+                walk(child)
         text = render_rich_text(getattr(block, "text", None)).strip()
         if text:
             parts.append(text)
