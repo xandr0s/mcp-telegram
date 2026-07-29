@@ -257,9 +257,34 @@ class Telegram:
                 except Exception as e:
                     logger.warning(f"Failed to mark message {message.id} as read: {e}")
 
+            await self._resolve_rich_message(_entity, message)
             results.append(Message.from_message(message))
 
         return Messages(messages=results, dialog=dialog)
+
+    async def _resolve_rich_message(self, entity: hints.Entity, message: Any) -> None:
+        """Replace a partial rich message with the full one, in place.
+
+        Rich messages arrive alongside the message with `part=True`: that is the
+        "read more" preview, not the post. On a real post the preview held 55
+        blocks and 20 photos against 64 and 23 in the full version, so ~600
+        characters of text and three photos were missing. `messages.getRichMessage`
+        returns the whole thing.
+        """
+        rich = getattr(message, "rich_message", None)
+        if rich is None or not getattr(rich, "part", False):
+            return
+        try:
+            result = await self.client(  # type: ignore
+                functions.messages.GetRichMessageRequest(peer=entity, id=message.id)
+            )
+        except Exception as e:
+            logger.warning(f"Failed to fetch full rich message {message.id}: {e}")
+            return
+        for full in getattr(result, "messages", None) or []:
+            if full.id == message.id and getattr(full, "rich_message", None):
+                message.rich_message = full.rich_message
+                return
 
     async def download_media(
         self, entity: str | int, message_id: int, path: str | None = None
@@ -352,6 +377,7 @@ class Telegram:
                     (parsed from link: {link})"
             )
 
+        await self._resolve_rich_message(entity, message)
         return Message.from_message(message)
 
     async def _can_send_message(self, entity: hints.Entity) -> bool:
