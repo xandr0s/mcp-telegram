@@ -1,7 +1,9 @@
 """Telegram client wrapper."""
 
+import asyncio
 import itertools
 import logging
+import re
 
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -9,7 +11,8 @@ from typing import Any
 
 from pydantic import SecretStr
 from pydantic_settings import BaseSettings
-from telethon import TelegramClient, hints, types  # type: ignore
+from telethon import TelegramClient, hints, types, utils  # type: ignore
+from telethon.errors import FloodWaitError, PhoneNotOccupiedError  # type: ignore
 from telethon.tl import custom, functions, patched  # type: ignore
 from xdg_base_dirs import xdg_state_home
 
@@ -17,6 +20,7 @@ from mcp_telegram.types import (
     Dialog,
     DownloadedMedia,
     Media,
+    MemberTagResult,
     Message,
     Messages,
 )
@@ -45,6 +49,7 @@ class Telegram:
         self._downloads_dir.mkdir(parents=True, exist_ok=True)
 
         self._client: TelegramClient | None = None
+        self._phone_lookup_lock = asyncio.Lock()
 
     @property
     def client(self) -> TelegramClient:
@@ -91,6 +96,154 @@ class Telegram:
         )
 
         return self._client
+
+    async def list_chat_members(
+        self, entity: str | int, offset: int = 0, limit: int = 200
+    ) -> dict[str, Any]:
+        """Read one supergroup membership page, including completeness metadata.
+
+        Advance offset by returned_count, not by the requested limit. Compare
+        unique user IDs with total and participants_count before claiming a full
+        roster; Telegram may restrict visibility. No participants are modified.
+        """
+        if offset < 0 or not 1 <= limit <= 200:
+            raise ValueError("offset must be non-negative and limit between 1 and 200")
+        chat = await self.client.get_entity(entity)
+        if not isinstance(chat, types.Channel) or not chat.megagroup:
+            raise ValueError("Member listing requires a supergroup")
+        full = await self.client(functions.channels.GetFullChannelRequest(chat))
+        page = await self.client(
+            functions.channels.GetParticipantsRequest(
+                channel=chat,
+                filter=types.ChannelParticipantsSearch(""),
+                offset=offset,
+                limit=limit,
+                hash=0,
+            )
+        )
+        users = {user.id: user for user in page.users}
+        members = []
+        for participant in page.participants:
+            user = users[participant.user_id]
+            members.append(
+                {
+                    "id": user.id,
+                    "first_name": user.first_name,
+                    "last_name": user.last_name,
+                    "username": user.username,
+                    "usernames": [
+                        alias.username
+                        for alias in (user.usernames or [])
+                        if alias.active
+                    ],
+                    "phone": user.phone,
+                    "bot": bool(user.bot),
+                    "deleted": bool(user.deleted),
+                    "tag": getattr(participant, "rank", None),
+                }
+            )
+        return {
+            "chat_id": utils.get_peer_id(chat),
+            "title": chat.title,
+            "offset": offset,
+            "returned_count": len(page.participants),
+            "total": page.count,
+            "participants_count": full.full_chat.participants_count,
+            "participants_hidden": bool(full.full_chat.participants_hidden),
+            "can_view_participants": bool(full.full_chat.can_view_participants),
+            "members": members,
+        }
+
+    async def resolve_phone(self, phone: str) -> dict[str, Any]:
+        """Resolve a phone number without importing or mutating contacts."""
+        if not isinstance(phone, str) or not re.fullmatch(r"\+\d{10,15}", phone):
+            raise ValueError(
+                "phone must be in international +digits format (10..15 digits)"
+            )
+
+        request = functions.contacts.ResolvePhoneRequest(phone=phone)
+        async with self._phone_lookup_lock:
+            try:
+                response = await self.client(request, flood_sleep_threshold=0)
+            except PhoneNotOccupiedError:
+                return {"status": "not_found"}
+            except FloodWaitError as error:
+                return {"status": "rate_limited", "retry_after": error.seconds}
+            finally:
+                await asyncio.sleep(3)
+
+        user_id = response.peer.user_id
+        user = next(
+            (candidate for candidate in response.users if candidate.id == user_id), None
+        )
+        if not isinstance(user, types.User):
+            return {"status": "not_found"}
+        return {
+            "status": "found",
+            "id": user.id,
+            "first_name": user.first_name,
+            "last_name": user.last_name,
+            "username": user.username,
+            "usernames": [
+                alias.username for alias in (user.usernames or []) if alias.active
+            ],
+            "deleted": bool(user.deleted),
+            "bot": bool(user.bot),
+        }
+
+    async def set_member_tag(
+        self,
+        entity: str | int,
+        member: str | int,
+        tag: str,
+        dry_run: bool = True,
+    ) -> MemberTagResult:
+        """Resolve or apply a group member tag using the existing connection.
+
+        Args:
+            entity: Basic group or supergroup identifier.
+            member: User identifier.
+            tag: Up to 16 characters, or empty to remove the tag.
+            dry_run: Resolve identities without writing when true. Membership,
+                permissions and Telegram's emoji restriction are checked by
+                Telegram on application, not guaranteed by the preview.
+
+        Returns:
+            Resolved numeric IDs, tag and whether the write succeeded.
+
+        Raises:
+            ValueError: Tag too long, unsupported chat or non-user participant.
+            RPCError: Telegram rejects resolution or the tag update.
+        """
+        if len(tag) > 16:
+            raise ValueError("Member tags must be at most 16 characters")
+
+        chat = await self.client.get_entity(entity)
+        if not (
+            isinstance(chat, types.Chat)
+            or (isinstance(chat, types.Channel) and chat.megagroup)
+        ):
+            raise ValueError("Member tags require a basic group or supergroup")
+
+        user = await self.client.get_entity(member)
+        if not isinstance(user, types.User):
+            raise ValueError("The member must be a Telegram user")
+
+        peer = await self.client.get_input_entity(chat)
+        participant = await self.client.get_input_entity(user)
+        if not dry_run:
+            await self.client(
+                functions.messages.EditChatParticipantRankRequest(
+                    peer=peer, participant=participant, rank=tag
+                )
+            )
+
+        return MemberTagResult(
+            chat_id=utils.get_peer_id(chat),
+            user_id=user.id,
+            tag=tag,
+            applied=not dry_run,
+        )
 
     async def send_message(
         self,

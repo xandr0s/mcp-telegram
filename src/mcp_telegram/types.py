@@ -12,6 +12,15 @@ from telethon.tl import custom, patched  # type: ignore
 from .utils import render_rich_message
 
 
+class MemberTagResult(BaseModel):
+    """Resolved tag operation; applied is true only after a successful RPC."""
+
+    chat_id: int
+    user_id: int
+    tag: str
+    applied: bool
+
+
 class DialogType(Enum):
     """The type of a dialog."""
 

@@ -137,6 +137,35 @@ Here's a comprehensive list of tools you can use to interact with Telegram throu
 | `delete_message` | 🗑️ Remove one or multiple messages                            |
 | `get_messages`   | 📜 Retrieve message history with advanced filtering options   |
 
+### Group member tags
+
+`set_member_tag(entity, member, tag, dry_run=True)` sets a group member's tag
+using the connected Telegram account. It does not promote the member or change
+administrator rights. Supports basic groups and supergroups.
+
+- `entity`: group username or marked Telegram chat ID (as a string).
+- `member`: user username or numeric user ID (as a string).
+- `tag`: up to 16 characters; Telegram does not allow emoji. An empty string
+  removes the tag. Telegram validates the final tag and permissions.
+- `dry_run`: defaults to `true`. Resolves the group and user and returns their
+  numeric IDs without writing. This preview does not verify membership or rights.
+  Set `false` only after the user approves the exact group, member and tag.
+
+To modify another member's tag, the connected account needs the `manage_ranks`
+administrator right. Resolution and Telegram RPC errors are returned to the caller;
+failed requests are not reported as successful. Unknown numeric user IDs may need
+resolving through a username first, as Telegram also requires an access hash.
+
+Example preview:
+
+```json
+{"entity": "@deckhouse_ru", "member": "@employee", "tag": "Флант"}
+```
+
+The result contains `chat_id`, `user_id`, `tag`, and `applied`. After reviewing the
+preview, call with the returned numeric IDs as strings and `dry_run: false` to
+apply. To remove the tag, use the same call with `tag: ""`.
+
 ### 🔍 Search & Navigation
 
 | Tool                | Description                                             |
@@ -189,3 +218,20 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 <div align="center">
   <p>Made with ❤️ by <a href="https://x.com/dryeab">Yeabsira Driba</a></p>
 </div>
+
+### Read supergroup members
+
+`list_chat_members(entity, offset=0, limit=200)` reads one membership page using
+only Telegram read requests. It returns IDs, names, usernames and active aliases,
+visible phone numbers, bot/deleted flags and member tags. Advance `offset` by
+`returned_count`. To establish completeness, compare unique IDs with `total` and
+`participants_count`; hidden members or insufficient rights may limit visibility.
+
+### Resolve an account by phone
+
+`resolve_phone(phone)` accepts an international number in `+digits` format.
+It uses `contacts.resolvePhone` without importing contacts or sending messages.
+The result has status `found`, `not_found`, or `rate_limited`; a found result
+includes the account ID, name, username and active aliases. Privacy settings may
+prevent a match. Requests are serialized with a three-second delay, and a
+`rate_limited` result includes `retry_after` seconds.

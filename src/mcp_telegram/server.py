@@ -3,11 +3,18 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime
+from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
 from mcp_telegram.telegram import Telegram
-from mcp_telegram.types import Dialog, DownloadedMedia, Message, Messages
+from mcp_telegram.types import (
+    Dialog,
+    DownloadedMedia,
+    MemberTagResult,
+    Message,
+    Messages,
+)
 from mcp_telegram.utils import parse_entity
 
 
@@ -30,6 +37,58 @@ mcp = FastMCP(
     "mcp-telegram",
     lifespan=app_lifespan,
 )
+
+
+@mcp.tool()
+async def list_chat_members(
+    entity: str, offset: int = 0, limit: int = 200
+) -> dict[str, Any]:
+    """Read a page of supergroup members without changing the chat.
+
+    Returns IDs, names, usernames, visible phones, bot/deleted flags and tags.
+    Advance offset by returned_count until total is reached or an empty page.
+    Check unique IDs against total and participants_count for completeness.
+    Visibility may be limited by Telegram. limit is 1..200; offset starts at 0.
+    """
+    return await tg.list_chat_members(parse_entity(entity), offset=offset, limit=limit)
+
+
+@mcp.tool()
+async def resolve_phone(phone: str) -> dict[str, Any]:
+    """Read-only lookup of a Telegram account by international phone number.
+
+    This performs one Telegram contacts.resolvePhone request and never imports,
+    adds, edits, or messages contacts. Telegram may return not_found for a
+    number that is private or not registered.
+    """
+    return await tg.resolve_phone(phone)
+
+
+@mcp.tool()
+async def set_member_tag(
+    entity: str, member: str, tag: str, dry_run: bool = True
+) -> MemberTagResult:
+    """Preview, set or remove a member tag in a basic group or supergroup.
+
+    Uses the connected Telegram account without changing administrator rights.
+    Changing another user's tag requires the manage_ranks administrator right.
+    Obtain explicit approval for the exact chat, member and tag before applying.
+
+    Args:
+        entity: Group username or marked numeric chat ID, as a string.
+        member: User username or numeric user ID, as a string.
+        tag: Up to 16 characters, without emoji. Empty string removes the tag.
+        dry_run: Defaults to true: resolve identities, without writing. Does not
+            verify membership, rights or server-side tag validation. Use the
+            returned numeric IDs with false to apply an approved change.
+
+    Returns:
+        Resolved chat_id, user_id, tag and applied. Telegram errors propagate;
+        applied is true only after a successful write.
+    """
+    return await tg.set_member_tag(
+        parse_entity(entity), parse_entity(member), tag, dry_run=dry_run
+    )
 
 
 @mcp.tool()
