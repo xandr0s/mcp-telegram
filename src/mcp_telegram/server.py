@@ -1,5 +1,7 @@
 """MCP Telegram Server."""
 
+import asyncio
+
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -18,18 +20,38 @@ from mcp_telegram.types import (
 from mcp_telegram.utils import parse_entity
 
 
+_client_lock = asyncio.Lock()
+_active_sessions = 0
+
+
 @asynccontextmanager
 async def app_lifespan(server: FastMCP) -> AsyncIterator[None]:
     """Lifespan manager for the app.
 
-    This will connect to Telegram on startup and disconnect on shutdown.
+    Connects to Telegram for the first session and disconnects once the last
+    one is gone.
+
+    This runs per MCP session, while `tg` holds a single client for the whole
+    process. Connecting and disconnecting per session therefore tore the
+    connection out from under the sessions that were still using it: under
+    streamable HTTP, where clients come and go, every session teardown showed
+    up as a telethon reconnect ("Server closed the connection: 0 bytes read").
+    With stdio there is exactly one session, so the behaviour is unchanged.
     """
-    try:
+    global _active_sessions
+
+    async with _client_lock:
         tg.create_client()
-        await tg.client.connect()
+        if not tg.client.is_connected():
+            await tg.client.connect()
+        _active_sessions += 1
+    try:
         yield
     finally:
-        await tg.client.disconnect()  # type: ignore
+        async with _client_lock:
+            _active_sessions -= 1
+            if _active_sessions == 0:
+                await tg.client.disconnect()  # type: ignore
 
 
 tg = Telegram()
