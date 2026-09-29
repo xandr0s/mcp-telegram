@@ -19,7 +19,6 @@ from mcp_telegram.types import (
 )
 from mcp_telegram.utils import parse_entity
 
-
 _client_lock = asyncio.Lock()
 _active_sessions = 0
 
